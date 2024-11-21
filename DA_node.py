@@ -1,27 +1,28 @@
 import rclpy
 from rclpy.node import Node
+from collections import defaultdict
 from rclpy.action import ActionClient
 from sensor_msgs.msg import Image
-from std_msgs.msg import String
-from geometry_msgs.msg import Point
+import std_msgs.msg as msg
+from geometry_msgs.msg import Point, PoseStamped
 from cv_bridge import CvBridge
-import torch
 import cv2
+import numpy as np
 from ultralytics import YOLO  # YOLOv8
-from deep_sort_realtime.deepsort_tracker import DeepSort
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSDurabilityPolicy, QoSHistoryPolicy
-from action_interfaces.action import NavigateToCoordinate
+from nav2_msgs.action import NavigateToPose  # Change here
+import json
+import torch
 
 class AMRControlNode(Node):
     def __init__(self):
         super().__init__('amr_control_node')
 
         self.cap = cv2.VideoCapture(0)
-        self.cap.set(cv2.CAP_PROP_FPS, 10)
-
+        self.cap.set(cv2.CAP_PROP_FPS, 60)
+        
         # YOLOv8 모델 초기화
-        self.yolo_model = YOLO("yolov8.pt") 
-        self.deepsort = DeepSort()
+        self.yolo_model = YOLO("./yolov8n.pt") 
         
         # 실시간 처리 및 손실 없는 전송을 위해 설정
         qos_profile = QoSProfile(
@@ -32,15 +33,22 @@ class AMRControlNode(Node):
         )       
 
         # 카메라 스트리밍 토픽생성
-        self.image_publisher = self.create_subscription(
+        self.image_publisher = self.create_publisher(
             Image,
-            '/webcam/image_raw',
-            self.image_callback,
+            'webcam',
+            qos_profile
+        )
+        
+        self.detection_publisher = self.create_publisher(
+            msg.String,
+            'detection',
             qos_profile
         )
 
+        self.img_timer = self.create_timer(0.1, self.image_callback)
+
         # AMR 목표로 보낼 action client생성
-        self._action_client = ActionClient(self, NavigateToCoordinate, 'navigate_to_coordinate')
+        self._action_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')  # Change here
 
         # 5개 영역의 하나의 꼭짓점 좌표 정의 (각 영역별로 임의의 path를 지정해주는 로직)
         self.zones = {
@@ -51,54 +59,103 @@ class AMRControlNode(Node):
             'E': Point(x=9.0, y=10.0)
         }
 
+        self.detected_objects = defaultdict(lambda: None)
+        self.track_history = defaultdict(lambda: [])
     
     # 객체를 탐지하여 confidence를 통해 
     # 객체를 탐지하여 탐지된 객체의 confidence가 0.5이하인 경우 출입 영역의 이름을 amr에 요청 
     def image_callback(self):
-
-        ret, msg = self.cap.read()
-        # 웹캠 이미지 받기
-        frame = self.convert_ros_image_to_cv2(msg)
         
         # 객체 감지 및 추적
-        detections = self.detect_objects(frame)
-        
-        for detection in detections:
-            confidence = detection['confidence']
-            if confidence < 0.5:
-                zone_name = self.get_zone_for_detection(detection)
-                self.send_amr_request(zone_name)
+        detections, track_ids, boxes, confidences = self.detect_objects()
+        ros_image = self.convert_cv2_to_ros_image(detections)
+        # ros_image.header = msg.Header()
+        # ros_image.header.stamp = self.get_clock().now().to_msg()
+        self.image_publisher.publish(ros_image)
+        self.get_logger().info("Publishing video frame")
+
+        detect_dic = {}
+
+        for track_id, box, confidence in zip(track_ids, boxes, confidences):
+            # Tensor를 리스트로 변환
+            if isinstance(box, torch.Tensor):  # box가 Tensor인 경우
+                box_list = box.tolist()  # Tensor를 리스트로 변환
+            else:
+                box_list = box  # 이미 리스트라면 그대로 사용
+
+            if isinstance(confidence, torch.Tensor):  # confidence가 Tensor인 경우
+                confidence_value = confidence.item()  # Tensor를 float으로 변환
+            else:
+                confidence_value = confidence  # 이미 숫자라면 그대로 사용
+            
+            # detect_dic에 정보 저장
+            detect_dic[track_id] = [{'box': box_list}, {'confidence': confidence_value}]
+            
+            if confidence_value < 0.5:
+                zone_name = self.get_zone_for_detection(track_id, box)
+                if zone_name:
+                    # 현재 구역과 이전 구역이 다르면 목표 변경
+                    if self.detected_objects.get(track_id) != zone_name:
+                        self.send_amr_request(zone_name)
+                        self.detected_objects[track_id] = zone_name
+
+        # JSON 직렬화
+        detect_str = json.dumps(detect_dic)
+
+        # ROS2 메시지로 포장
+        detect_msg = msg.String()
+        detect_msg.data = detect_str
+
+        # 퍼블리시
+        self.detection_publisher.publish(detect_msg)
+
 
     # ROS2 이미지를 OpenCV로 변환
-    def convert_ros_image_to_cv2(self, ros_image):
+    def convert_cv2_to_ros_image(self, ros_image):
         # ROS2 이미지를 OpenCV로 변환
         bridge = CvBridge()
-        return bridge.imgmsg_to_cv2(ros_image, desired_encoding='bgr8')
+        return bridge.cv2_to_imgmsg(ros_image, encoding='bgr8')
     
     # 객체 탐색 기능
     # 객체를 탐색하여 해당 객체의 바운딩 박스 좌표와 confidencefmf detection에 저장
-    def detect_objects(self, frame):
+    def detect_objects(self):
+        # Store the track history
+        
+        success, frame = self.cap.read()
         # YOLOv8 객체 탐지
-        results = self.yolo_model(frame)
-        detections = []
-        for result in results:
-            bbox = result['bbox']
-            confidence = result['confidence']
-            detections.append({'bbox': bbox, 'confidence': confidence})
+        results = self.yolo_model.track(frame, persist=True)
+        # Get the boxes and track IDs
+        boxes = results[0].boxes.xywh.cpu()
+        track_ids = results[0].boxes.id.int().cpu().tolist()
+        confidences = results[0].boxes.conf.cpu().tolist()
+        # Visualize the results on the frame
+        annotated_frame = results[0].plot()
+        # Plot the tracks
+        for box, track_id in zip(boxes, track_ids):
+            x, y, w, h = box
+            track = self.track_history[track_id]
+            track.append((float(x), float(y)))  # x, y center point
+            if len(track) > 30:  # retain 90 tracks for 90 frames
+                track.pop(0)
+                # Draw the tracking lines
+            points = np.hstack(track).astype(np.int32).reshape((-1, 1, 2))
+            cv2.polylines(annotated_frame, [points], isClosed=False, color=(230, 230, 230), thickness=10)
+        
 
-        # Deep SORT 추적
-        track_results = self.deepsort.update_tracks(detections, frame)  # 트랙 결과
-        return detections
+        return annotated_frame, track_ids, boxes, confidences
 
     # 객체의 바운딩 박스의 중앙점이 지정된 zone안에 있다면 해당 지역의 이름을 return
-    def get_zone_for_detection(self, detection):
+    def get_zone_for_detection(self, track_id, box):
         # 객체의 위치에 맞는 영역 결정 (예시로, 중간점을 기준으로 비교)
-        x_center = (detection['bbox'][0] + detection['bbox'][2]) / 2
-        y_center = (detection['bbox'][1] + detection['bbox'][3]) / 2
         
+        object_dic = {}
+        x_center = (box[0] + box[2] / 2)
+        y_center = (box[1] + box[3] / 2)
+        object_dic[track_id] = [x_center, y_center]
+        self.get_logger().info("check")
         # zone_name 별로 임의의 zone_coords를 지정해둔다.
         for zone_name, zone_coords in self.zones.items():
-            if self.is_within_zone(x_center, y_center, zone_coords):
+            if self.is_within_zone(object_dic[track_id][0], object_dic[track_id][1], zone_coords):
                 return zone_name
         return None
 
@@ -112,10 +169,10 @@ class AMRControlNode(Node):
         # zone_name이 주어 진다면
         if zone_name:
             self.get_logger().info(f"Sending AMR to zone {zone_name}")
-            goal = NavigateToCoordinate.Goal()
-            goal.x = self.zones[zone_name].x # zone_name과 매칭 되어 있는 디지털 맵 위의 x좌표
-            goal.y = self.zones[zone_name].y # zone_name과 매칭 되어 있는 디지털 맵 위의 x좌표
-            goal.zone_name = zone_name
+            goal = NavigateToPose.Goal()
+            goal.pose.position.x = self.zones[zone_name].x # zone_name과 매칭 되어 있는 디지털 맵 위의 x좌표
+            goal.pose.position.y = self.zones[zone_name].y # zone_name과 매칭 되어 있는 디지털 맵 위의 x좌표
+            goal.pose.orientation.w = 1.0  # Assuming no rotation, you can modify this as needed
 
             self._action_client.wait_for_server()
 
@@ -131,7 +188,7 @@ def main(args=None):
     node = AMRControlNode()
 
     rclpy.spin(node)
-
+    node.destroy_node()
     rclpy.shutdown()
 
 if __name__ == '__main__':
