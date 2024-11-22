@@ -9,6 +9,9 @@
     <p>hi</p>
     <img src="{{ url_for('video_feed') }}" width="640" height="480" />
     <div id="output"></div>
+    <form action="/end_emergency" method="POST">
+        <button type="submit">End Emergency</button>
+    </form>    
     <script>
         const eventSource = new EventSource('/data');
 

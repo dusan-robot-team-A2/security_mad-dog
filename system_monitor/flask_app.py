@@ -1,4 +1,4 @@
-from flask import Flask, Response, render_template
+from flask import Flask, Response, render_template, Request
 from sm_node import SystemMonitoringNode
 from threading import Thread
 import cv2
@@ -36,7 +36,7 @@ def generate_sm_variable():
         amr_position = smNode.amr_position
 
         data = {
-            "emergency_status": smNode.amr_alert,
+            "emergency_status": smNode.emergency_status,
             "amr_status": smNode.amr_status,
             "amr_positioin": [amr_position.x, amr_position.y] if amr_position else None,
             "da_track_data": smNode.da_track_data,
@@ -58,6 +58,13 @@ def video_feed():
     # Returns the video stream response
     return Response(generate_frames_cctv(),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
+
+@app.route('/end_emergency', methods=['POST'])
+def end_emergency():
+    print("end emergency")
+    smNode.end_emergency()
+    return Response(status=200)
+    
 
 if __name__ == "__main__":
     ros2_thread = Thread(target=spin_ros2_node, args=[smNode], daemon=True)

@@ -1,2 +1,6 @@
 .vscode
 .venv
+.yolo8n.pt
+build
+install
+log

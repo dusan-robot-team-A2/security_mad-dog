@@ -3,6 +3,8 @@ from rclpy.node import Node
 from std_msgs.msg import String, Bool
 from sensor_msgs.msg import Image
 from geometry_msgs.msg import Point
+from mad_dog_interface.srv import ActivatePatrol
+from mad_dog_interface.srv import ActivateGoHome
 import random
 
 class SimplePublisher(Node):
@@ -12,6 +14,8 @@ class SimplePublisher(Node):
         self.amr_alert_pub = self.create_publisher(Bool, 'amr_alert', 10)
         self.amr_position_pub = self.create_publisher(Point, 'amr_position', 10)
 
+        self.patrol_service = self.create_service(ActivatePatrol, 'patrol_service', self.handle_patrol_service_request)
+        self.gohome_service = self.create_service(ActivateGoHome, 'gohome_service', self.handle_gohome_service_request)
 
         self.timer = self.create_timer(1.0, self.timer_callback)  # 1초마다 콜백 실행
         self.get_logger().info('Publisher node has been started.')
@@ -32,17 +36,15 @@ class SimplePublisher(Node):
         amr_position.y = float(random.randint(0,300))
         self.amr_position_pub.publish(amr_position)
         self.get_logger().info(f'AMR pos Pub: "{str(amr_position)}"') 
+    
+    def handle_patrol_service_request(self, request, response):
+        response.success = True
+        return response
 
-        da_track_data_list = [[
-            {"id": "list","date": "list"}
-        ],
-        [
+    def handle_gohome_service_request(self, request, response):
+        response.success = True
+        return response
 
-        ]]
-        amr_position.x = float(random.randint(0,300))
-        amr_position.y = float(random.randint(0,300))
-        self.amr_position_pub.publish(amr_position)
-        self.get_logger().info(f'AMR pos Pub: "{str(amr_position)}"') 
 
 def main(args=None):
     rclpy.init(args=args)  # ROS 2 초기화
