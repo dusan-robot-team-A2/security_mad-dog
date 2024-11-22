@@ -8,5 +8,23 @@
 <body>
     <p>hi</p>
     <img src="{{ url_for('video_feed') }}" width="640" height="480" />
+    <div id="output"></div>
+    <script>
+        const eventSource = new EventSource('/data');
+
+        eventSource.onmessage = function(event) {
+            const jsonData = JSON.parse(event.data); // JSON 데이터 파싱
+            document.getElementById('output').innerHTML = `
+                <p>Emergency Status: ${jsonData.emergency_status}</p>
+                <p>AMR Status: ${jsonData.amr_status}</p>
+            `;
+            console.log(jsonData)
+        };
+
+        // 에러 처리
+        eventSource.onerror = function() {
+            console.error("Connection lost or an error occurred.");
+        };
+    </script>
 </body>
 </html>

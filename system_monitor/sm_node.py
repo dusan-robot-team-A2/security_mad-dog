@@ -76,7 +76,7 @@ class SystemMonitoringNode(Node):
         self.da_track_data = []
 
         self.amr_alert = False
-        self.amr_position = None
+        self.amr_position: Point = None
         self.amr_image_frame = None
 
     def cctv_image_callback(self, msg):

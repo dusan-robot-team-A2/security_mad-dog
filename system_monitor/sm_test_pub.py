@@ -3,6 +3,7 @@ from rclpy.node import Node
 from std_msgs.msg import String, Bool
 from sensor_msgs.msg import Image
 from geometry_msgs.msg import Point
+import random
 
 class SimplePublisher(Node):
     def __init__(self):
@@ -17,18 +18,29 @@ class SimplePublisher(Node):
 
     def timer_callback(self):
         da_alert = Bool()
-        da_alert.data = True
+        da_alert.data = bool(random.randint(0,1))
         self.da_alert_pub.publish(da_alert)
         self.get_logger().info(f'DA Alert Pub: "{da_alert.data}"') 
 
         amr_alert = Bool()
-        amr_alert.data = True
+        amr_alert.data = bool(random.randint(0,1))
         self.amr_alert_pub.publish(amr_alert)
         self.get_logger().info(f'AMR Alert Pub: "{amr_alert.data}"') 
 
         amr_position = Point()
-        amr_position.x = 10.0
-        amr_position.y = 30.0
+        amr_position.x = float(random.randint(0,300))
+        amr_position.y = float(random.randint(0,300))
+        self.amr_position_pub.publish(amr_position)
+        self.get_logger().info(f'AMR pos Pub: "{str(amr_position)}"') 
+
+        da_track_data_list = [[
+            {"id": "list","date": "list"}
+        ],
+        [
+
+        ]]
+        amr_position.x = float(random.randint(0,300))
+        amr_position.y = float(random.randint(0,300))
         self.amr_position_pub.publish(amr_position)
         self.get_logger().info(f'AMR pos Pub: "{str(amr_position)}"') 
 

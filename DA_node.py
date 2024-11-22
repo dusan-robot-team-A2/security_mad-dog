@@ -18,7 +18,7 @@ class AMRControlNode(Node):
     def __init__(self):
         super().__init__('amr_control_node')
 
-        self.cap = cv2.VideoCapture(0)
+        self.cap = cv2.VideoCapture(4)
         self.cap.set(cv2.CAP_PROP_FPS, 60)
         
         # YOLOv8 모델 초기화
@@ -35,13 +35,13 @@ class AMRControlNode(Node):
         # 카메라 스트리밍 토픽생성
         self.image_publisher = self.create_publisher(
             Image,
-            'webcam',
+            'cctv_image',
             qos_profile
         )
         
         self.detection_publisher = self.create_publisher(
             msg.String,
-            'detection',
+            'da_track_data',
             qos_profile
         )
 
@@ -67,7 +67,11 @@ class AMRControlNode(Node):
     def image_callback(self):
         
         # 객체 감지 및 추적
-        detections, track_ids, boxes, confidences = self.detect_objects()
+        try:
+            detections, track_ids, class_names, boxes, confidences = self.detect_objects()
+        except:
+            return False
+        
         ros_image = self.convert_cv2_to_ros_image(detections)
         # ros_image.header = msg.Header()
         # ros_image.header.stamp = self.get_clock().now().to_msg()
@@ -76,7 +80,7 @@ class AMRControlNode(Node):
 
         detect_dic = {}
 
-        for track_id, box, confidence in zip(track_ids, boxes, confidences):
+        for track_id, class_name, box, confidence in zip(track_ids, class_names, boxes, confidences):
             # Tensor를 리스트로 변환
             if isinstance(box, torch.Tensor):  # box가 Tensor인 경우
                 box_list = box.tolist()  # Tensor를 리스트로 변환
@@ -89,7 +93,7 @@ class AMRControlNode(Node):
                 confidence_value = confidence  # 이미 숫자라면 그대로 사용
             
             # detect_dic에 정보 저장
-            detect_dic[track_id] = [{'box': box_list}, {'confidence': confidence_value}]
+            detect_dic[track_id] = {'class': class_name,'box': box_list, 'confidence': confidence_value}
             
             if confidence_value < 0.5:
                 zone_name = self.get_zone_for_detection(track_id, box)
@@ -125,6 +129,8 @@ class AMRControlNode(Node):
         # YOLOv8 객체 탐지
         results = self.yolo_model.track(frame, persist=True)
         # Get the boxes and track IDs
+        class_ids = results[0].boxes.cls
+        class_names = [self.yolo_model.names[int(class_id)] for class_id in class_ids]
         boxes = results[0].boxes.xywh.cpu()
         track_ids = results[0].boxes.id.int().cpu().tolist()
         confidences = results[0].boxes.conf.cpu().tolist()
@@ -142,7 +148,7 @@ class AMRControlNode(Node):
             cv2.polylines(annotated_frame, [points], isClosed=False, color=(230, 230, 230), thickness=10)
         
 
-        return annotated_frame, track_ids, boxes, confidences
+        return annotated_frame, track_ids, class_names, boxes, confidences
 
     # 객체의 바운딩 박스의 중앙점이 지정된 zone안에 있다면 해당 지역의 이름을 return
     def get_zone_for_detection(self, track_id, box):
