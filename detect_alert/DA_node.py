@@ -14,11 +14,12 @@ from nav2_msgs.action import NavigateToPose  # Change here
 import json
 import torch
 
+
 class AMRControlNode(Node):
     def __init__(self):
         super().__init__('amr_control_node')
 
-        self.cap = cv2.VideoCapture(4)
+        self.cap = cv2.VideoCapture(0)
         self.cap.set(cv2.CAP_PROP_FPS, 60)
         
         # YOLOv8 모델 초기화
@@ -48,19 +49,23 @@ class AMRControlNode(Node):
         self.img_timer = self.create_timer(0.1, self.image_callback)
 
         # AMR 목표로 보낼 action client생성
-        self._action_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')  # Change here
+        self.area_publisher = self.create_publisher(
+            msg.String,
+            'navigate_to_zone',
+            qos_profile
+        )  # Change here
 
         # 5개 영역의 하나의 꼭짓점 좌표 정의 (각 영역별로 임의의 path를 지정해주는 로직)
         self.zones = {
-            'A': Point(x=1.0, y=2.0),
-            'B': Point(x=3.0, y=4.0),
-            'C': Point(x=5.0, y=6.0),
-            'D': Point(x=7.0, y=8.0),
-            'E': Point(x=9.0, y=10.0)
+            'A': {'x1': 50, 'y1': 50, 'x2': 150, 'y2': 150},
+            'B': {'x1': 150, 'y1': 50, 'x2': 250, 'y2': 150},
+            'C': {'x1': 50, 'y1': 150, 'x2': 150, 'y2': 250},
+            'D': {'x1': 150, 'y1': 150, 'x2': 250, 'y2': 250}
         }
 
         self.detected_objects = defaultdict(lambda: None)
         self.track_history = defaultdict(lambda: [])
+        self.detect_area = 'Not Found'
     
     # 객체를 탐지하여 confidence를 통해 
     # 객체를 탐지하여 탐지된 객체의 confidence가 0.5이하인 경우 출입 영역의 이름을 amr에 요청 
@@ -95,13 +100,14 @@ class AMRControlNode(Node):
             # detect_dic에 정보 저장
             detect_dic[track_id] = {'class': class_name,'box': box_list, 'confidence': confidence_value}
             
-            if confidence_value < 0.5:
+            if detect_dic[track_id]['class'] != 'dummy1' and detect_dic[track_id]['class'] != 'dummy2':
                 zone_name = self.get_zone_for_detection(track_id, box)
-                if zone_name:
+                self.get_logger().info("check")
+                if self.detect_area != zone_name:
                     # 현재 구역과 이전 구역이 다르면 목표 변경
-                    if self.detected_objects.get(track_id) != zone_name:
-                        self.send_amr_request(zone_name)
-                        self.detected_objects[track_id] = zone_name
+                    self.send_amr_request(zone_name)
+                    self.get_logger().info("send zone")
+                    self.detect_area = zone_name
 
         # JSON 직렬화
         detect_str = json.dumps(detect_dic)
@@ -158,36 +164,26 @@ class AMRControlNode(Node):
         x_center = (box[0] + box[2] / 2)
         y_center = (box[1] + box[3] / 2)
         object_dic[track_id] = [x_center, y_center]
-        self.get_logger().info("check")
+        
         # zone_name 별로 임의의 zone_coords를 지정해둔다.
         for zone_name, zone_coords in self.zones.items():
-            if self.is_within_zone(object_dic[track_id][0], object_dic[track_id][1], zone_coords):
+            if self.is_within_zone(object_dic[track_id][0], object_dic[track_id][1], zone_name):
                 return zone_name
-        return None
+        return 'Not Found'
 
     # 영역 내 포함 여부 확인 (SLAM 디지털 맵을 통해 범위 값을 최적화할 예정)
-    def is_within_zone(self, x, y, zone_coords):
+    def is_within_zone(self, x, y, zone_name):
         # 영역의 좌표를 x1,x2, y1, y2라고 할때 x1-0.5, x2+0.5 범위 안에 객체의 중앙x 좌표가 있는지, y1-0.5,y2+0.5 범위 안에 객체의 중앙 y 좌표가 있는지 확인
-        return zone_coords.x - 0.5 < x < zone_coords.x + 0.5 and zone_coords.y - 0.5 < y < zone_coords.y + 0.5
+        return self.zones[zone_name]['x1'] <= x <= self.zones[zone_name]['x2'] and self.zones[zone_name]['y1'] <= y <= self.zones[zone_name]['y2']
 
     # send amr에 action으로 이동 요청(action은 요청을 수행하는 도중 goal을 바꿀 수 있기 때문)
     def send_amr_request(self, zone_name):
         # zone_name이 주어 진다면
         if zone_name:
             self.get_logger().info(f"Sending AMR to zone {zone_name}")
-            goal = NavigateToPose.Goal()
-            goal.pose.position.x = self.zones[zone_name].x # zone_name과 매칭 되어 있는 디지털 맵 위의 x좌표
-            goal.pose.position.y = self.zones[zone_name].y # zone_name과 매칭 되어 있는 디지털 맵 위의 x좌표
-            goal.pose.orientation.w = 1.0  # Assuming no rotation, you can modify this as needed
-
-            self._action_client.wait_for_server()
-
-            # 요청 보내기
-            self._action_client.send_goal_async(goal, feedback_callback=self.feedback_callback)
-
-    def feedback_callback(self, feedback):
-        # AMR의 피드백 처리 (진행 상태)
-        self.get_logger().info(f"AMR Feedback: {feedback.status}")
+            goal = msg.String()
+            goal.data = zone_name
+            self.area_publisher.publish(goal)
 
 def main(args=None):
     rclpy.init(args=args)
