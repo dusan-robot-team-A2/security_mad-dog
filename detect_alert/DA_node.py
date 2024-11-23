@@ -48,7 +48,7 @@ class AMRControlNode(Node):
 
         self.img_timer = self.create_timer(0.1, self.image_callback)
 
-        # AMR 목표로 보낼 action client생성
+        # AMR 목표로 보낼 prblisher
         self.area_publisher = self.create_publisher(
             msg.String,
             'navigate_to_zone',

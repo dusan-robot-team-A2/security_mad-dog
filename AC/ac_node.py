@@ -1,5 +1,4 @@
 import rclpy
-from rclpy.action import ActionServer
 from rclpy.node import Node
 from std_msgs.msg import String
 from mad_dog_interface.srv import ActivatePatrol
@@ -15,6 +14,8 @@ import cv2
 import json
 import torch
 from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import Twist
+
 
 class MoveToZoneActionServer(Node):
 
@@ -33,36 +34,63 @@ class MoveToZoneActionServer(Node):
             history=QoSHistoryPolicy.KEEP_LAST, # 최근 메시지만 유지
             depth=10  # 최근 10개의 메시지를 유지
         )  
-        
-        # DA zone string
-        self.zone_action_server = ActionServer(
-            NavigateToSuspect,  
-            'navigate_to_zone', 
-            self.zone_callback 
-        )
 
-        # SM patrol 변경값 request
-        self.patrol_service = self.create_service(ActivatePatrol,
+
+        # DA_subscrive_area_str
+        self.da_area_subscription = self.create_subscription(
+            String,
+            'navigate_to_zone',
+            self.da_area_callback,
+            10
+        ) 
+        # area값에 대응되는 디지털 맵 내 좌표(일요일에 수정)
+        self.zones = {
+            'A': Point(x=1.0, y=2.0),
+            'B': Point(x=3.0, y=4.0),
+            'C': Point(x=5.0, y=6.0),
+            'D': Point(x=7.0, y=8.0),
+            'E': Point(x=9.0, y=10.0),
+            'F': Point(x=11.0, y=12.0)
+        }
+
+        # SM_request_patrol(mode)_int
+        self.patrol_service = self.create_service(
+            ActivatePatrol,
             'patrol_service',
             self.handle_patrol_service_request
         )
 
-        # SM gohome request
-        self.gohome_service = self.create_service(ActivateGoHome,
+        # SM_resquest_gohome(mode)_bool
+        self.gohome_service = self.create_service(
+            ActivateGoHome,
             'gohome_service',
             self.handle_gohome_service_request
         )
-    
-                
-        # SM AMR_Image pub
-        self.AMR_image_publisher = self.create_publisher(
-            Image,
-            'amr_image',
-            self.image_callback,
-            qos_profile
-        )
-        
+
         # AMR AMR_Image_sub
+        self.amr_camimage_subscribtion = self.create_subscription(
+            Image,
+            'amrcam_image', 
+            self.amr_image_callback,
+            10
+        )
+        self.bridge = CvBridge()
+        self.model = YOLO('/home/rokey/ros2_ws/src/amr_controller/amr_controller/best.pt')
+        self.cap = cv2.VideoCapture(4)
+        self.screen_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        self.screen_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        self.screen_area = self.screen_width * self.screen_height
+        self.target_area_threshold = 0.8 * self.screen_area
+                
+        # # AMR_pub_img
+        # self.AMR_image_publisher = self.create_publisher(
+        #     Image,
+        #     'amr_image',
+        #     self.image_callback,
+        #     qos_profile
+        # )
+        
+        # AMR_sub_camimage_.jpg
         self.AMRcam_image_subscribtion = self.create_subscription(
             Image,
             'amrcam_image', 
@@ -70,10 +98,18 @@ class MoveToZoneActionServer(Node):
             10
         )
 
-        # AMR goal좌표 pub
-        self.publisher_ = self.create_publisher(
+
+        # AMR_pub_좌표이동_turtlebot 지정 topic
+        self.amr_pointmove_publisher = self.create_publisher(
             PoseStamped,
             '/move_base_simple/goal',
+            10
+        )
+
+        # AMR_pub_teleop_cmd_vel topic
+        self.amr_cmd_publisher_ = self.create_publisher(
+            Twist,
+            '/cmd_vel',
             10
         )
 
@@ -84,18 +120,10 @@ class MoveToZoneActionServer(Node):
         # 정지상태
         self.AMR_mode = 0
 
-        # 5개 영역의 하나의 꼭짓점 좌표 정의 (각 영역별로 임의의 path를 지정해주는 로직)
-        self.zones = {
-            'A': Point(x=1.0, y=2.0),
-            'B': Point(x=3.0, y=4.0),
-            'C': Point(x=5.0, y=6.0),
-            'D': Point(x=7.0, y=8.0),
-            'E': Point(x=9.0, y=10.0)
-        }
+    
 
     
-    # zond에 대한 str을 받음
-    def zone_callback(self, goal_handle):
+    def da_area_callback(self, goal_handle):
         # goal 받았다는 로그
         self.get_logger().info(f"Received goal: {goal_handle.request.area}")
 
@@ -141,10 +169,13 @@ class MoveToZoneActionServer(Node):
         return response
 
     def handle_gohome_service_request(self, request, response):
+        # gohome mode 활성화
         response.success = True
         self.AMR_mode = 0
-        # 집으로 가는 함수
+        # amr_pub_goal
         return response
+    
+    def 
     
     def amr_image_callback(self, msg):
         frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
