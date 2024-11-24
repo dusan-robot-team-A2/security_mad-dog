@@ -282,12 +282,15 @@ class MoveToZoneActionServer(Node):
     def tracking(self, frame):
 
         intruder_detection = None
-        intruder_center_error = 0.0 
+        intruder_center_error = float('inf')  # 큰 값으로 초기화 
+        screen_center_x = int(self.screen_width / 2)
 
         # Iterate over self.results to find the object with the highest confidence
         for result in self.results:
-            if result['class_id'] == 'car':
+            if result['class_name'] == 'car':
                 x1, y1, x2, y2 = result.boxes.data[:4]
+                confidence = result['confidence']
+                class_id = result['class_id']
                 center_x = int((x1 + x2) / 2)
                 center_y = int((y1 + y2) / 2)
                 center_error = abs(center_x - screen_center_x)  # change here
@@ -329,7 +332,6 @@ class MoveToZoneActionServer(Node):
             twist = Twist()
 
             # Align the robot with the center of the screen
-            screen_center_x = int(self.screen_width / 2)
             alignment_tolerance = 20  # Pixel tolerance for alignment
 
             if abs(center_x - screen_center_x) > alignment_tolerance:
@@ -348,7 +350,7 @@ class MoveToZoneActionServer(Node):
             else:
                 twist.linear.x = 0.0  # Stop moving if the object is not too close
 
-            self.cmd_publisher.publish(twist)
+            self.amr_cmd_vel_pub.publish(twist)
         
         # Not found
         else:
