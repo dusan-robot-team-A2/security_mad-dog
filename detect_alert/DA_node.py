@@ -19,11 +19,13 @@ class AMRControlNode(Node):
     def __init__(self):
         super().__init__('amr_control_node')
 
-        self.cap = cv2.VideoCapture(4)
+        self.cap = cv2.VideoCapture(0)
         self.cap.set(cv2.CAP_PROP_FPS, 60)
+        # self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        # self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
         
         # YOLOv8 모델 초기화
-        self.yolo_model = YOLO("./yolov8n.pt") 
+        self.yolo_model = YOLO("./yolo_models/cctv.pt") 
         
         # 실시간 처리 및 손실 없는 전송을 위해 설정
         qos_profile = QoSProfile(
@@ -31,7 +33,7 @@ class AMRControlNode(Node):
             durability=QoSDurabilityPolicy.TRANSIENT_LOCAL, # 구독자가 서버와 연결된 후 그 동안 수집된 데이터를 받을 수 있음
             history=QoSHistoryPolicy.KEEP_LAST, # 최근 메시지만 유지
             depth=10  # 최근 10개의 메시지를 유지
-        )       
+        )
 
         # 카메라 스트리밍 토픽생성
         self.image_publisher = self.create_publisher(
@@ -45,8 +47,15 @@ class AMRControlNode(Node):
             'da_track_data',
             qos_profile
         )
+        
+        self.da_alert_publisher = self.create_publisher(
+            msg.Bool,
+            'da_alert',
+            qos_profile
+        )
 
         self.img_timer = self.create_timer(0.1, self.image_callback)
+        self.alert_timer = self.create_timer(0.5, self.da_alert_callback)
 
         # AMR 목표로 보낼 prblisher
         self.area_publisher = self.create_publisher(
@@ -56,19 +65,27 @@ class AMRControlNode(Node):
         )  # Change here
 
         # 5개 영역의 하나의 꼭짓점 좌표 정의 (각 영역별로 임의의 path를 지정해주는 로직)
-        self.zones = {
-            'A': {'x1': 50, 'y1': 50, 'x2': 150, 'y2': 150},
-            'B': {'x1': 150, 'y1': 50, 'x2': 250, 'y2': 150},
-            'C': {'x1': 50, 'y1': 150, 'x2': 150, 'y2': 250},
-            'D': {'x1': 150, 'y1': 150, 'x2': 250, 'y2': 250}
+    
+        zones = {
+            'A': [(3, 3), (4, 237), (195, 239), (196, 2)],
+            'B': [(195, 238), (387, 236), (387, 1), (197, 4)],
+            'C': [(388, 0), (604, 0), (585, 228), (388, 237)],
+            'D': [(79, 240), (84, 478), (267, 479), (263, 238)],
+            'E': [(264, 240), (269, 478), (453, 478), (459, 237)],
+            'F': [(458, 236), (453, 477), (638, 479), (638, 231)]
         }
+        self.zones = self.get_polygon_points(zones)
 
         self.detected_objects = defaultdict(lambda: None)
         self.track_history = defaultdict(lambda: [])
         self.detect_area = 'Not Found'
+        self.isDetected = False
     
-    # 객체를 탐지하여 confidence를 통해 
-    # 객체를 탐지하여 탐지된 객체의 confidence가 0.5이하인 경우 출입 영역의 이름을 amr에 요청 
+    def da_alert_callback(self):
+        alertMsg = msg.Bool()
+        alertMsg.data = self.isDetected
+        self.da_alert_publisher.publish(alertMsg)
+    
     def image_callback(self):
         
         # 객체 감지 및 추적
@@ -77,9 +94,11 @@ class AMRControlNode(Node):
         except:
             return False
         
+        # zone 그리기
+        detections = self.draw_zones(detections)
+
+        # 이미지 전송
         ros_image = self.convert_cv2_to_ros_image(detections)
-        # ros_image.header = msg.Header()
-        # ros_image.header.stamp = self.get_clock().now().to_msg()
         self.image_publisher.publish(ros_image)
         self.get_logger().info("Publishing video frame")
 
@@ -99,16 +118,12 @@ class AMRControlNode(Node):
             
             # detect_dic에 정보 저장
             detect_dic[track_id] = {'class': class_name,'box': box_list, 'confidence': confidence_value}
-            
-            if detect_dic[track_id]['class'] != 'dummy1' and detect_dic[track_id]['class'] != 'dummy2':
-                zone_name = self.get_zone_for_detection(track_id, box)
-                self.get_logger().info("check")
-                if self.detect_area != zone_name:
-                    # 현재 구역과 이전 구역이 다르면 목표 변경
-                    self.send_amr_request(zone_name)
-                    self.get_logger().info("send zone")
-                    self.detect_area = zone_name
 
+        
+        self.detected_objects = detect_dic
+        
+        # 거수자 분석 및 amr 명령
+        self.detect_suspect()
         # JSON 직렬화
         detect_str = json.dumps(detect_dic)
 
@@ -125,6 +140,22 @@ class AMRControlNode(Node):
         # ROS2 이미지를 OpenCV로 변환
         bridge = CvBridge()
         return bridge.cv2_to_imgmsg(ros_image, encoding='bgr8')
+    
+    def draw_zones(self, frame):
+        for zone_name, points in self.zones.items():
+            # NumPy 배열로 변환된 좌표에서 중심점 계산
+            centroid_x = int(np.mean(points[:, 0, 0]))
+            centroid_y = int(np.mean(points[:, 0, 1]))
+
+            # 다각형 그리기
+            cv2.polylines(frame, [points], isClosed=True, color=(0, 255, 0), thickness=2)
+
+            # 다각형 이름 표시
+            cv2.putText(frame, zone_name, (centroid_x, centroid_y), cv2.FONT_HERSHEY_SIMPLEX,
+                        fontScale=0.6, color=(255, 0, 0), thickness=1)
+
+        
+        return frame
     
     # 객체 탐색 기능
     # 객체를 탐색하여 해당 객체의 바운딩 박스 좌표와 confidencefmf detection에 저장
@@ -156,20 +187,47 @@ class AMRControlNode(Node):
 
         return annotated_frame, track_ids, class_names, boxes, confidences
 
-    # 객체의 바운딩 박스의 중앙점이 지정된 zone안에 있다면 해당 지역의 이름을 return
-    def get_zone_for_detection(self, track_id, box):
-        # 객체의 위치에 맞는 영역 결정 (예시로, 중간점을 기준으로 비교)
+    def detect_suspect(self):
+        for id, detected in self.detected_objects.items():
+            if detected['class'] == 'dummy2':
+                pos = self.get_middle_point_of_box(detected['box'])
+                
+                zone_name = self.get_zone_of_point(pos)
+                if zone_name != None:
+                    self.isDetected = True
+                    self.send_amr_request(zone_name)
+                    return
         
-        object_dic = {}
+        self.isDetected = False
+
+    def get_polygon_points(self, zones):
+        return { k:np.array(points).reshape((-1, 1, 2)) for k,points in zones.items() }
+
+    def get_middle_point_of_box(self,box):
         x_center = (box[0] + box[2] / 2)
         y_center = (box[1] + box[3] / 2)
-        object_dic[track_id] = [x_center, y_center]
+        return (x_center, y_center)
+
+    # 객체의 바운딩 박스의 중앙점이 지정된 zone안에 있다면 해당 지역의 이름을 return
+    # def get_zone_for_detection(self, track_id, box):
+    #     # 객체의 위치에 맞는 영역 결정 (예시로, 중간점을 기준으로 비교)
         
-        # zone_name 별로 임의의 zone_coords를 지정해둔다.
-        for zone_name, zone_coords in self.zones.items():
-            if self.is_within_zone(object_dic[track_id][0], object_dic[track_id][1], zone_name):
-                return zone_name
-        return 'Not Found'
+    #     object_dic = {}
+    #     x_center = (box[0] + box[2] / 2)
+    #     y_center = (box[1] + box[3] / 2)
+    #     object_dic[track_id] = [x_center, y_center]
+        
+    #     # zone_name 별로 임의의 zone_coords를 지정해둔다.
+    #     for zone_name, zone_coords in self.zones.items():
+    #         if self.is_within_zone(object_dic[track_id][0], object_dic[track_id][1], zone_name):
+    #             return zone_name
+    #     return 'Not Found'
+    def get_zone_of_point(self, point):
+        for k, polygon_points in self.zones.items():
+            result = cv2.pointPolygonTest(polygon_points, point, False)
+            if result >= 0:
+                return k
+        return None
 
     # 영역 내 포함 여부 확인 (SLAM 디지털 맵을 통해 범위 값을 최적화할 예정)
     def is_within_zone(self, x, y, zone_name):
