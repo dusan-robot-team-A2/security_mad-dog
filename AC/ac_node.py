@@ -1,11 +1,12 @@
 import rclpy
+from rclpy.action import ActionServer
 from rclpy.node import Node
 from std_msgs.msg import String
 from mad_dog_interface.srv import ActivatePatrol
 from mad_dog_interface.srv import ActivateGoHome
 from mad_dog_interface.action import NavigateToSuspect
-from sensor_msgs.msg import Image
-from geometry_msgs.msg import Point #PoseWithCovarianceStamped
+from sensor_msgs.msg import Image, CompressedImage
+from geometry_msgs.msg import Point, PoseStamped, Twist, Quaternion #PoseWithCovarianceStamped
 from cv_bridge import CvBridge
 from ultralytics import YOLO  # YOLOv8
 import numpy as np
@@ -13,8 +14,15 @@ from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSDurabilityPolicy, QoS
 import cv2
 import json
 import torch
-from geometry_msgs.msg import PoseStamped
-from geometry_msgs.msg import Twist
+from nav2_msgs.action import NavigateToPose, FollowWaypoints
+from rclpy.action import ActionClient
+from rclpy.duration import Duration
+import math
+import threading
+import sys
+import select
+import termios
+import tty
 
 
 class MoveToZoneActionServer(Node):
@@ -24,7 +32,10 @@ class MoveToZoneActionServer(Node):
 
         self.cap = cv2.VideoCapture(4)
         self.cap.set(cv2.CAP_PROP_FPS, 60)
-        
+        self.success, self.frame = self.cap.read()
+        # YOLOv8 객체 탐지
+        self.results = self.yolo_model.track(self.frame, persist=True)
+
         # YOLOv8 모델 초기화
         self.yolo_model = YOLO("./yolov8n.pt")
 
@@ -34,63 +45,40 @@ class MoveToZoneActionServer(Node):
             history=QoSHistoryPolicy.KEEP_LAST, # 최근 메시지만 유지
             depth=10  # 최근 10개의 메시지를 유지
         )  
+        
+        self.amr_waypoint_action_client = ActionClient(self, FollowWaypoints, '/follow_waypoints')
 
-
-        # DA_subscrive_area_str
-        self.da_area_subscription = self.create_subscription(
-            String,
-            'navigate_to_zone',
-            self.da_area_callback,
+        # DA zone string
+        self.zone_subscrib = self.create_subscription(
+            String,  
+            'navigate_to_zone', 
+            self.zone_callback, 
             10
-        ) 
-        # area값에 대응되는 디지털 맵 내 좌표(일요일에 수정)
-        self.zones = {
-            'A': Point(x=1.0, y=2.0),
-            'B': Point(x=3.0, y=4.0),
-            'C': Point(x=5.0, y=6.0),
-            'D': Point(x=7.0, y=8.0),
-            'E': Point(x=9.0, y=10.0),
-            'F': Point(x=11.0, y=12.0)
-        }
+        )
 
-        # SM_request_patrol(mode)_int
-        self.patrol_service = self.create_service(
-            ActivatePatrol,
+        # SM patrol 변경값 request
+        self.patrol_service = self.create_service(ActivatePatrol,
             'patrol_service',
             self.handle_patrol_service_request
         )
 
-        # SM_resquest_gohome(mode)_bool
-        self.gohome_service = self.create_service(
-            ActivateGoHome,
+        # SM gohome request
+        self.gohome_service = self.create_service(ActivateGoHome,
             'gohome_service',
             self.handle_gohome_service_request
         )
+                
+        # SM AMR_Image pub
+        self.AMR_image_publisher = self.create_publisher(
+            Image,
+            'amr_image',
+            self.image_callback,
+            qos_profile
+        )
+        
+        self.sm_tracked_image_publisher = self.create_publisher(Image, 'tracked_image', 10)
 
         # AMR AMR_Image_sub
-        self.amr_camimage_subscribtion = self.create_subscription(
-            Image,
-            'amrcam_image', 
-            self.amr_image_callback,
-            10
-        )
-        self.bridge = CvBridge()
-        self.model = YOLO('/home/rokey/ros2_ws/src/amr_controller/amr_controller/best.pt')
-        self.cap = cv2.VideoCapture(4)
-        self.screen_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        self.screen_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        self.screen_area = self.screen_width * self.screen_height
-        self.target_area_threshold = 0.8 * self.screen_area
-                
-        # # AMR_pub_img
-        # self.AMR_image_publisher = self.create_publisher(
-        #     Image,
-        #     'amr_image',
-        #     self.image_callback,
-        #     qos_profile
-        # )
-        
-        # AMR_sub_camimage_.jpg
         self.AMRcam_image_subscribtion = self.create_subscription(
             Image,
             'amrcam_image', 
@@ -98,55 +86,169 @@ class MoveToZoneActionServer(Node):
             10
         )
 
-
-        # AMR_pub_좌표이동_turtlebot 지정 topic
-        self.amr_pointmove_publisher = self.create_publisher(
+        # AMR goal좌표 pub
+        self.publisher_ = self.create_publisher(
             PoseStamped,
             '/move_base_simple/goal',
             10
         )
 
-        # AMR_pub_teleop_cmd_vel topic
-        self.amr_cmd_publisher_ = self.create_publisher(
-            Twist,
-            '/cmd_vel',
-            10
-        )
+        self.amr_cmd_publisher = self.create_publisher(Twist, '/cmd_vel', 10)
 
-        
-        
+        self.client = ActionClient(self, NavigateToPose, 'navigate_to_pose') #send navigation to action
+
+        self.zone = 'Not Found'
+        self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.img_timer = self.create_timer(0.1, self.image_callback)
+
+        self.screen_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        self.screen_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        self.screen_area = self.screen_width * self.screen_height
+        self.target_area_threshold = 0.8 * self.screen_area
 
         # 정지상태
         self.AMR_mode = 0
 
-    
+        # 5개 영역의 하나의 꼭짓점 좌표 정의 (각 영역별로 임의의 path를 지정해주는 로직)
+        self.zones = {
+            'A': Point(x=1.0, y=2.0),
+            'B': Point(x=3.0, y=4.0),
+            'C': Point(x=5.0, y=6.0),
+            'D': Point(x=7.0, y=8.0),
+            'E': Point(x=9.0, y=10.0)
+        }
 
+        self.home_pose = Point(x=5.0, y=3.0)
+
+    def euler_to_quaternion(self, roll, pitch, yaw):
+        # Convert Euler angles to a quaternion
+        qx = math.sin(roll / 2) * math.cos(pitch / 2) * math.cos(yaw / 2) - math.cos(roll / 2) * math.sin(pitch / 2) * math.sin(yaw / 2)
+        qy = math.cos(roll / 2) * math.sin(pitch / 2) * math.cos(yaw / 2) + math.sin(roll / 2) * math.cos(pitch / 2) * math.sin(yaw / 2)
+        qz = math.cos(roll / 2) * math.cos(pitch / 2) * math.sin(yaw / 2) - math.sin(roll / 2) * math.sin(pitch / 2) * math.cos(yaw / 2)
+        qw = math.cos(roll / 2) * math.cos(pitch / 2) * math.cos(yaw / 2) + math.sin(roll / 2) * math.sin(pitch / 2) * math.sin(yaw / 2)
+        return Quaternion(x=qx, y=qy, z=qz, w=qw)
+
+    def waypoint_goal(self):
+        # 세 개의 웨이포인트 정의 
+        waypoints = []
+
+        # 첫 번째 웨이포인트
+        waypoint1 = PoseStamped()
+        waypoint1.header.stamp.sec = 0
+        waypoint1.header.stamp.nanosec = 0
+        waypoint1.header.frame_id = "map"  # 프레임 ID를 설정 (예: "map")
+        waypoint1.pose.position.x = 0.35624730587005615
+        waypoint1.pose.position.y = -0.7531262636184692
+        waypoint1.pose.position.z = 0.0
+
+        waypoint1_yaw = 0.0  # Target orientation in radians
+        waypoint1.pose.orientation = self.euler_to_quaternion(0, 0, waypoint1_yaw)
+        
+        # waypoint1.pose.orientation.x = 0.0
+        # waypoint1.pose.orientation.y = 0.0
+        # waypoint1.pose.orientation.z = -0.9999865408184966
+        # waypoint1.pose.orientation.w = 0.005188273494832019
+        waypoints.append(waypoint1)
+
+        # 두 번째 웨이포인트
+        waypoint2 = PoseStamped()
+        waypoint2.header.stamp.sec = 0
+        waypoint2.header.stamp.nanosec = 0
+        waypoint2.header.frame_id = "map"  # 프레임 ID를 설정 (예: "map")
+        waypoint2.pose.position.x = -1.0062505006790161
+        waypoint2.pose.position.y = -0.15937140583992004
+        waypoint2.pose.position.z = 0.0
+        
+        waypoint2_yaw = 0.0  # Target orientation in radians
+        waypoint2.pose.orientation = self.euler_to_quaternion(0, 0, waypoint2_yaw)
+        
+        # waypoint2.pose.orientation.x = 0.0
+        # waypoint2.pose.orientation.y = 0.0
+        # waypoint2.pose.orientation.z = -0.9999330665398213
+        # waypoint2.pose.orientation.w = 0.01156989370173046
+        waypoints.append(waypoint2)
+
+        # 세 번째 웨이포인트
+        waypoint3 = PoseStamped()
+        waypoint3.header.stamp.sec = 0
+        waypoint3.header.stamp.nanosec = 0
+        waypoint3.header.frame_id = "map"  # 프레임 ID를 설정 (예: "map")
+        waypoint3.pose.position.x = -1.443751335144043
+        waypoint3.pose.position.y = -0.3468696177005768
+        waypoint3.pose.position.z = 0.0
+        
+        waypoint3_yaw = 0.0  # Target orientation in radians
+        waypoint3.pose.orientation = self.euler_to_quaternion(0, 0, waypoint3_yaw)
+                
+        # waypoint3.pose.orientation.x = 0.0
+        # waypoint3.pose.orientation.y = 0.0
+        # waypoint3.pose.orientation.z = -0.6938991006274311
+        # waypoint3.pose.orientation.w = 0.7200722450896453
+        waypoints.append(waypoint3)
+
+        # FollowWaypoints 액션 목표 생성 및 전송
+        goal_msg = FollowWaypoints.Goal()
+        goal_msg.poses = waypoints
+
+        # 서버 연결 대기
+        self.amr_waypoint_action_client.wait_for_server()
+
+        # 목표 전송 및 피드백 콜백 설정
+        self._send_goal_future = self.amr_waypoint_action_client.send_goal_async(
+            goal_msg,
+            feedback_callback=self.waypoint_feedback_callback
+        )
+        self._send_goal_future.add_done_callback(self.waypoint_response_callback)
+
+    def waypoint_feedback_callback(self, feedback_msg):
+        feedback = feedback_msg.feedback
+        self.get_logger().info(f'Current Waypoint Index: {feedback.current_waypoint}')
     
-    def da_area_callback(self, goal_handle):
+    def waypoint_response_callback(self, future):
+        goal_handle = future.result()
+        if not goal_handle.accepted:
+            self.get_logger().info('Goal rejected :(')
+            return
+
+        self.get_logger().info('Goal accepted :)')
+        self._goal_handle = goal_handle
+        self._get_result_future = goal_handle.get_result_async()
+        self._get_result_future.add_done_callback(self.get_waypoint_result_callback)
+
+    def cancel_move(self):
+        if self._goal_handle is not None:
+            self.get_logger().info('Attempting to cancel the move...')
+            cancel_future = self._goal_handle.cancel_goal_async()
+            cancel_future.add_done_callback(self.cancel_done_callback)
+        else:
+            self.get_logger().info('No active goal to cancel.')
+    
+    def cancel_done_callback(self, future):
+        cancel_response = future.result()
+        if len(cancel_response.goals_cancelled) > 0:
+            self.get_logger().info('Goal cancellation accepted.')
+            # self.destroy_node()
+            # rclpy.shutdown()
+            # sys.exit(0)
+        else:
+            self.get_logger().info('Goal cancellation failed or no active goal to cancel.')
+    
+    def get_waypoint_result_callback(self, future):
+        result = future.result().result
+        missed_waypoints = result.missed_waypoints
+        if missed_waypoints:
+            self.get_logger().info(f'Missed waypoints: {missed_waypoints}')
+        else:
+            self.get_logger().info('All waypoints completed successfully!')
+
+    # zond에 대한 str을 받음
+    def zone_callback(self, goal_handle):
         # goal 받았다는 로그
-        self.get_logger().info(f"Received goal: {goal_handle.request.area}")
-
-        if self.AMR_mode == 1:
-            # mode가 1인 경우: Goal 값으로 이동
-            for zone in goal_handle.request.area:
-                self.get_logger().info(f"Navigating to zone: {zone}")
-                # AMR 에 send goal 할 수 있도록 action 설계 추가
-
-            result = NavigateToSuspect.Result()
-            result.success = True
-            goal_handle.succeed()
+        self.zone = goal_handle
 
     # 디지털 맵 내 지정 구역으로 이동
     def navigate_to_zone(self, zone_name):
         
-        # 각 zone에 대한 좌표를 지정 (예시: zone_name에 대응하는 좌표)
-        zone_coordinates = {
-            'zone_1': {'x': 1.0, 'y': 2.0},
-            'zone_2': {'x': 3.0, 'y': 4.0},
-            'zone_3': {'x': 5.0, 'y': 6.0},
-        }
-
         if zone_name in self.zones:
             # 목표 좌표 가져오기
             target_pose = self.zones[zone_name]
@@ -154,97 +256,170 @@ class MoveToZoneActionServer(Node):
             # 목표 좌표를 PoseStamped 메시지로 생성
             goal_msg = PoseStamped()
             goal_msg.header.frame_id = 'map'  # SLAM에서 사용되는 좌표계 (보통 'map' 프레임)
+            goal_msg.header.stamp = self.get_clock().now().to_msg()
             goal_msg.pose.position.x = target_pose['x']
             goal_msg.pose.position.y = target_pose['y']
             goal_msg.pose.orientation.w = 1.0  # 회전 값 (회전 없음)
 
-            # 목표를 move_base_simple/goal로 발행
-            self.goal_publisher.publish(goal_msg)
-            self.get_logger().info(f"Sending goal to zone {zone_name}: {target_pose}")
-    
-    def handle_patrol_service_request(self, request, response):
-        response.success = True
-        if self.AMR_mode == 0:
-            self.AMR_mode = 1
-        return response
+            if not self.client.wait_for_server(timeout_sec=1.0):
+                self.get_logger().info('Action server not available')
+                return
 
-    def handle_gohome_service_request(self, request, response):
-        # gohome mode 활성화
-        response.success = True
-        self.AMR_mode = 0
-        # amr_pub_goal
-        return response
+            goal_pos = NavigateToPose.Goal()
+            goal_pos.pose = goal_msg.pose
+            self.client.send_goal_async(goal_msg, feedback_callback=self.feedback_callback)
+
+            # 목표를 move_base_simple/goal로 발행
+            self.publisher_.publish(goal_msg)
+            self.get_logger().info(f"Sending goal to zone {zone_name}: {target_pose}")
+
+            
+
+            annotated_frame, track_ids, class_names, boxes, confidences = self.detect_objects(self.results)
+            if 'car' in class_names:
+                self.tracking(self.frame, self.results)
+            else:
+                move_cmd = Twist()
+                radius = 5.0  # 원의 반지름
+                angular_speed = 0.2  # 회전 속도
+                linear_speed = angular_speed * radius  # 선형 속도
+
+                move_cmd.linear.x = linear_speed
+                move_cmd.angular.z = angular_speed
+
+                # 일정 시간 동안 원을 그림
+                rate = self.create_rate(10)
+                start_time = self.get_clock().now()
+                while (self.get_clock().now() - start_time) < Duration(seconds=2 * math.pi * radius / linear_speed):
+                    if 'car' in class_names:
+                        self.tracking(self.frame, self.results)
+                    else:
+                        self.cmd_vel_pub.publish(move_cmd)
+                        rate.sleep()
+
+                # 멈춤
+                move_cmd.linear.x = 0.0
+                move_cmd.angular.z = 0.0
+                self.cmd_vel_pub.publish(move_cmd)
     
-    def 
+    def tracking(self, frame, results):
+
+        intruder_detection = None
+        intruder_center_error = 0.0 
+
+        # Iterate over results to find the object with the highest confidence
+        for result in results:
+            if result['class_id'] == 'car':
+                x1, y1, x2, y2 = result.boxes.data[:4]
+                center_x = int((x1 + x2) / 2)
+                center_y = int((y1 + y2) / 2)
+                center_error = abs(center_x - screen_center_x)  # change here
+
+                if center_error < intruder_center_error: # change here
+                    intruder_center_error = center_error
+                    intruder_detection = (x1, y1, x2, y2, confidence, class_id)
+
+        # If a detection is found, draw it and control the robot
+        if intruder_detection:
+            x1, y1, x2, y2, confidence, class_id = intruder_detection
+            center_x = int((x1 + x2) / 2)
+            center_y = int((y1 + y2) / 2)
+            box_width = x2 - x1
+            box_height = y2 - y1
+            box_area = box_width * box_height
+
+            # Draw the bounding box and center point on the frame
+            cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
+            cv2.circle(frame, (center_x, center_y), 5, (0, 0, 255), -1)
+            label_text = f'Conf: {confidence:.2f} Class: {int(class_id)}'
+            cv2.putText(frame, label_text, (int(x1), int(y1) - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            
+
+            # Compress the frame and convert it to a ROS 2 CompressedImage message
+            _, compressed_frame = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+            compressed_img_msg = CompressedImage()
+            compressed_img_msg.header.stamp = self.get_clock().now().to_msg()
+            compressed_img_msg.format = "jpeg"
+            compressed_img_msg.data = compressed_frame.tobytes()
+
+            self.sm_tracked_image_publisher(compressed_img_msg)
+
+  
+            # Publish movement commands to align and move backward if the box area is too large
+            twist = Twist()
+
+            # Align the robot with the center of the screen
+            screen_center_x = int(self.screen_width / 2)
+            alignment_tolerance = 20  # Pixel tolerance for alignment
+
+            if abs(center_x - screen_center_x) > alignment_tolerance:
+                if center_x < screen_center_x:
+                    twist.angular.z = 0.2  # Rotate left
+                else:
+                    twist.angular.z = -0.2  # Rotate right
+            else:
+                twist.angular.z = 0.0  # Stop rotation when aligned
+
+            # Move backward if the object's bounding box area is greater than or equal to 80% of the screen area
+            if box_area < self.target_area_threshold:
+                twist.linear.x = 0.1
+            elif box_area > self.target_area_threshold:
+                twist.linear.x = -0.1  # Move backward slowly
+            else:
+                twist.linear.x = 0.0  # Stop moving if the object is not too close
+
+            self.amr_cmd_publisher.publish(twist)
+
+    def feedback_callback(self, feedback):
+        # 네비게이션 피드백 처리 (필요시 사용)
+        self.get_logger().info(f"Feedback: {feedback}")
+
+    def handle_patrol_service_request(self, response):
+        if response.success == True:
+            self.AMR_mode = 1
+            self.navigate_to_zone(self.zone)
+
+    def handle_gohome_service_request(self, request):
+        if request.success == True:
+            self.AMR_mode = 0
+            goal_msg = PoseStamped()
+            goal_msg.header.frame_id = 'map'  # SLAM에서 사용되는 좌표계 (보통 'map' 프레임)
+            goal_msg.pose.position.x = self.home_pose.x
+            goal_msg.pose.position.y = self.home_pose.y
+            goal_msg.pose.orientation.w = 1.0  # 회전 값 (회전 없음)
+
+            self.cap.release()
+            # 목표를 move_base_simple/goal로 발행
+            self.publisher_.publish(goal_msg)
+            self.get_logger().info(f"Sending AMR to home")
     
-    def amr_image_callback(self, msg):
-        frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
-        self.amr_image_frame = frame
+    def convert_cv2_to_ros_image(self, ros_image):
+        # ROS2 이미지를 OpenCV로 변환
+        bridge = CvBridge()
+        return bridge.cv2_to_imgmsg(ros_image, encoding='bgr8')
 
     def image_callback(self):
         
         # 객체 감지 및 추적
         try:
-            detections, track_ids, class_names, boxes, confidences = self.detect_objects()
+            detections, track_ids, class_names, boxes, confidences = self.detect_objects(self.frame, self.results)
         except:
             return False
         
         ros_image = self.convert_cv2_to_ros_image(detections)
         # ros_image.header = msg.Header()
         # ros_image.header.stamp = self.get_clock().now().to_msg()
-        self.image_publisher.publish(ros_image)
+        self.AMR_image_publisher.publish(ros_image)
         self.get_logger().info("Publishing video frame")
 
-        detect_dic = {}
+    def amr_image_callback(self, msg):
+        frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+        self.amr_image_frame = frame
 
-        for track_id, class_name, box, confidence in zip(track_ids, class_names, boxes, confidences):
-            # Tensor를 리스트로 변환
-            if isinstance(box, torch.Tensor):  # box가 Tensor인 경우
-                box_list = box.tolist()  # Tensor를 리스트로 변환
-            else:
-                box_list = box  # 이미 리스트라면 그대로 사용
-
-            if isinstance(confidence, torch.Tensor):  # confidence가 Tensor인 경우
-                confidence_value = confidence.item()  # Tensor를 float으로 변환
-            else:
-                confidence_value = confidence  # 이미 숫자라면 그대로 사용
-            
-            # detect_dic에 정보 저장
-            detect_dic[track_id] = {'class': class_name,'box': box_list, 'confidence': confidence_value}
-            
-            if confidence_value < 0.5:
-                zone_name = self.get_zone_for_detection(track_id, box)
-                if zone_name:
-                    # 현재 구역과 이전 구역이 다르면 목표 변경
-                    if self.detected_objects.get(track_id) != zone_name:
-                        self.send_amr_request(zone_name)
-                        self.detected_objects[track_id] = zone_name
-
-        # JSON 직렬화
-        detect_str = json.dumps(detect_dic)
-
-        # ROS2 메시지로 포장
-        detect_msg = String()
-        detect_msg.data = detect_str
-
-        # 퍼블리시
-        self.detection_publisher.publish(detect_msg)
-
-
-    # ROS2 이미지를 OpenCV로 변환
-    def convert_cv2_to_ros_image(self, ros_image):
-        # ROS2 이미지를 OpenCV로 변환
-        bridge = CvBridge()
-        return bridge.cv2_to_imgmsg(ros_image, encoding='bgr8')
-    
-    # 객체 탐색 기능
-    # 객체를 탐색하여 해당 객체의 바운딩 박스 좌표와 confidencefmf detection에 저장
-    def detect_objects(self):
+    def detect_objects(self, results):
         # Store the track history
         
-        success, frame = self.cap.read()
-        # YOLOv8 객체 탐지
-        results = self.yolo_model.track(frame, persist=True)
         # Get the boxes and track IDs
         class_ids = results[0].boxes.cls
         class_names = [self.yolo_model.names[int(class_id)] for class_id in class_ids]
@@ -267,14 +442,36 @@ class MoveToZoneActionServer(Node):
 
         return annotated_frame, track_ids, class_names, boxes, confidences
    
-
+def keyboard_listener(node):
+    old_settings = termios.tcgetattr(sys.stdin)
+    tty.setcbreak(sys.stdin.fileno())
+    try:
+        while True:
+            if select.select([sys.stdin], [], [], 0.1)[0]:
+                key = sys.stdin.read(1)
+                if key.lower() == 'n':
+                    node.get_logger().info('Key "g" pressed. Sending goal...')
+                    node.Nav_goal()
+                elif key.lower() == 'w':
+                    node.get_logger().info('Key "w" pressed. Sending waypoint')
+                elif key.lower() == 's':
+                    node.get_logger().info('Key "s" pressed. Cancelling goal...')
+                    node.cancel_move()
+                    break
+    finally:
+        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
         
 
 def main(args=None):
     rclpy.init(args=args)
     action_server = MoveToZoneActionServer()
-    rclpy.spin(action_server)  # 노드가 계속 실행되도록
+    
+    thread = threading.Thread(target=keyboard_listener, args=(action_server,), daemon=True)
+    thread.start()
 
+    rclpy.spin(action_server)  # 노드가 계속 실행되도록
+    action_server.destroy_node()
+    cv2.destroyAllWindows()
     rclpy.shutdown()
 
 if __name__ == '__main__':
