@@ -11,8 +11,6 @@ from cv_bridge import CvBridge
 from ultralytics import YOLO  # YOLOv8
 import numpy as np
 import cv2
-import json
-import torch
 from nav2_msgs.action import NavigateToPose, FollowWaypoints
 import math
 import threading
@@ -95,12 +93,13 @@ class MoveToZoneActionServer(Node):
 
         # 5개 영역의 하나의 꼭짓점 좌표 정의 (각 영역별로 임의의 path를 지정해주는 로직)
         self.zones = {
-            'A': Point(x=1.0, y=2.0),
-            'B': Point(x=3.0, y=4.0),
-            'C': Point(x=5.0, y=6.0),
-            'D': Point(x=7.0, y=8.0),
-            'E': Point(x=9.0, y=10.0),
-            'Home': Point(x=5.0, y=3.0)
+            'A': Point(x=-1.05, y=-0.25),
+            'B': Point(x=-0.8, y=-0.3),
+            'C': Point(x=-0.515, y=-0.24),
+            'D': Point(x=-0.855, y=-0.675),
+            'E': Point(x=-0.495, y=-0.625),
+            'F': Point(x=-0.665, y=-0.65),
+            'Home': Point(x=0.043317, y=0.033049)
         }
 
     def euler_to_quaternion(self, roll, pitch, yaw):
@@ -120,8 +119,8 @@ class MoveToZoneActionServer(Node):
         waypoint1.header.stamp.sec = 0
         waypoint1.header.stamp.nanosec = 0
         waypoint1.header.frame_id = "map"  # 프레임 ID를 설정 (예: "map")
-        waypoint1.pose.position.x = 0.35624730587005615
-        waypoint1.pose.position.y = -0.7531262636184692
+        waypoint1.pose.position.x = 0.36131
+        waypoint1.pose.position.y = -0.1551
         waypoint1.pose.position.z = 0.0
 
         waypoint1_yaw = 0.0  # Target orientation in radians
@@ -138,8 +137,8 @@ class MoveToZoneActionServer(Node):
         waypoint2.header.stamp.sec = 0
         waypoint2.header.stamp.nanosec = 0
         waypoint2.header.frame_id = "map"  # 프레임 ID를 설정 (예: "map")
-        waypoint2.pose.position.x = -1.0062505006790161
-        waypoint2.pose.position.y = -0.15937140583992004
+        waypoint2.pose.position.x = 0.2981
+        waypoint2.pose.position.y = -0.61095
         waypoint2.pose.position.z = 0.0
         
         waypoint2_yaw = 0.0  # Target orientation in radians
@@ -476,8 +475,8 @@ class MoveToZoneActionServer(Node):
 
 
         # Set the position (adjust these values as needed)
-        initial_pose.pose.pose.position.x = 0.1750425100326538 # X-coordinate
-        initial_pose.pose.pose.position.y = 0.05808566138148308 # Y-coordinate
+        initial_pose.pose.pose.position.x = 0.043317 # X-coordinate
+        initial_pose.pose.pose.position.y = 0.033049 # Y-coordinate
         initial_pose.pose.pose.position.z = 0.0  # Z should be 0 for 2D navigation
 
         # Set the orientation (in quaternion form)
