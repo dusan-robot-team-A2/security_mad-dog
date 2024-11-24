@@ -19,7 +19,7 @@ class AMRControlNode(Node):
     def __init__(self):
         super().__init__('amr_control_node')
 
-        self.cap = cv2.VideoCapture(0)
+        self.cap = cv2.VideoCapture(4)
         self.cap.set(cv2.CAP_PROP_FPS, 60)
         
         # YOLOv8 모델 초기화
