@@ -39,10 +39,12 @@ class SimplePublisher(Node):
     
     def handle_patrol_service_request(self, request, response):
         response.success = True
+        print("patrol mod")
         return response
 
     def handle_gohome_service_request(self, request, response):
         response.success = True
+        print("gohome mod")
         return response
 
 

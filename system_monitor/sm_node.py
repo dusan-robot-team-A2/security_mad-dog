@@ -4,6 +4,8 @@ from std_msgs.msg import String, Bool
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 from geometry_msgs.msg import Point
+from mad_dog_interface.srv import ActivatePatrol
+from mad_dog_interface.srv import ActivateGoHome
 import json
 
 
@@ -56,6 +58,13 @@ class SystemMonitoringNode(Node):
             10
         )
 
+
+        #patrol client
+        self.active_patrol_client = self.create_client(ActivatePatrol, 'patrol_service')
+        self.active_gohome_client = self.create_client(ActivateGoHome, 'gohome_service')
+        self.gohome_request = ActivateGoHome.Request()
+        self.patrol_request = ActivatePatrol.Request()
+
         # Prevent unused variable warning
         self.cctv_image_subscribtion
         self.da_alert_subscription
@@ -87,8 +96,7 @@ class SystemMonitoringNode(Node):
         self.da_alert = msg.data
         if not self.emergency_status and self.da_alert: #emergency 최초 발생 situation
             self.emergency_status = True
-            #ac 의 patrol service 요청과 관련된 로직 필요
-            print("ac의 patrol service 요청") 
+            self.active_patrol_client.call_async(self.patrol_request)
         
 
     def da_track_data_callback(self, msg):
@@ -118,7 +126,6 @@ class SystemMonitoringNode(Node):
     def end_emergency(self):
         self.emergency_status = False
         self.amr_status = 0
-        #ac의 go_home service 호출
-        print("ac의 go_home service 요청")
+        self.active_gohome_client.call_async(self.gohome_request)
 
     
