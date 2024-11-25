@@ -6,7 +6,7 @@ from mad_dog_interface.srv import ActivatePatrol
 from mad_dog_interface.srv import ActivateGoHome
 from mad_dog_interface.action import NavigateToSuspect
 from sensor_msgs.msg import Image, CompressedImage
-from geometry_msgs.msg import Point, PoseStamped, Twist, Quaternion, PoseWithCovarianceStamped
+from geometry_msgs.msg import Point, PoseStamped, Twist, Quaternion, PoseWithCovarianceStamped, Pose
 from cv_bridge import CvBridge
 from ultralytics import YOLO  # YOLOv8
 import numpy as np
@@ -95,13 +95,13 @@ class MoveToZoneActionServer(Node):
 
         # 5개 영역의 하나의 꼭짓점 좌표 정의 (각 영역별로 임의의 path를 지정해주는 로직)
         self.zones = {
-            'A': Point(x=-1.05, y=-0.25, w=-0.003),
-            'B': Point(x=-0.8, y=-0.3, w=-0.726),
-            'C': Point(x=-0.515, y=-0.24, w=1.0),
-            'D': Point(x=-0.855, y=-0.675, w=-0.003),
-            'E': Point(x=-0.495, y=-0.625, w=0.705),
-            'F': Point(x=-0.665, y=-0.65, w=1.0),
-            'Home': Point(x=0.043317, y=0.033049, w=-0.003)
+            'A': Pose(position = Point(x=-1.05, y=-0.25), orientation = self.euler_to_quaternion(0, 0, -0.003)),
+            'B': Pose(position = Point(x=-0.8, y=-0.3), orientation = self.euler_to_quaternion(0, 0, -0.726)),
+            'C': Pose(position = Point(x=-0.515, y=-0.24), orientation = self.euler_to_quaternion(0, 0, 1.0)),
+            'D': Pose(position = Point(x=-0.855, y=-0.675), orientation = self.euler_to_quaternion(0, 0, -0.003)),
+            'E': Pose(position = Point(x=-0.495, y=-0.625), orientation = self.euler_to_quaternion(0, 0, 0.705)),
+            'F': Pose(position = Point(x=-0.665, y=-0.65), orientation = self.euler_to_quaternion(0, 0, 1.0)),
+            'Home': Pose(position = Point(x=0.043317, y=0.033049), orientation = self.euler_to_quaternion(0, 0, -0.003))
         }
 
     def euler_to_quaternion(self, roll, pitch, yaw):
@@ -155,7 +155,7 @@ class MoveToZoneActionServer(Node):
         # FollowWaypoints 액션 목표 생성 및 전송
         goal_msg = FollowWaypoints.Goal()
         goal_msg.poses = self.waypoints
-
+        self.get_logger().info(f"ch")
         # 서버 연결 대기
         self.amr_waypoint_action_client.wait_for_server()
 
@@ -268,9 +268,9 @@ class MoveToZoneActionServer(Node):
             goal_msg = PoseStamped()
             goal_msg.header.frame_id = 'map'  # SLAM에서 사용되는 좌표계 (보통 'map' 프레임)
             goal_msg.header.stamp = self.get_clock().now().to_msg()
-            goal_msg.pose.position.x = target_pose.x
-            goal_msg.pose.position.y = target_pose.y
-            goal_msg.pose.orientation.w = target_pose.w  # 회전 값 (회전 없음)
+            goal_msg.pose.position.x = target_pose.position.x
+            goal_msg.pose.position.y = target_pose.position.y
+            goal_msg.pose.orientation = target_pose.orientation  # 회전 값 (회전 없음)
 
             if not self.amr_navgoal_client.wait_for_server(timeout_sec=1.0):
                 self.get_logger().info('Action server not available')
