@@ -123,7 +123,7 @@ class MoveToZoneActionServer(Node):
         waypoint1.pose.position.y = -0.1551
         waypoint1.pose.position.z = 0.0
 
-        waypoint1_yaw = 0.0  # Target orientation in radians
+        waypoint1_yaw = -0.7205  # Target orientation in radians
         waypoint1.pose.orientation = self.euler_to_quaternion(0, 0, waypoint1_yaw)
         
         # waypoint1.pose.orientation.x = 0.0
@@ -141,7 +141,7 @@ class MoveToZoneActionServer(Node):
         waypoint2.pose.position.y = -0.61095
         waypoint2.pose.position.z = 0.0
         
-        waypoint2_yaw = 0.0  # Target orientation in radians
+        waypoint2_yaw = 1.0  # Target orientation in radians
         waypoint2.pose.orientation = self.euler_to_quaternion(0, 0, waypoint2_yaw)
         
         # waypoint2.pose.orientation.x = 0.0
