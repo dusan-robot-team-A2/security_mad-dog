@@ -114,7 +114,7 @@ class MoveToZoneActionServer(Node):
 
     def waypoint_goal(self):
         # 세 개의 웨이포인트 정의
-        waypoints = []
+        self.waypoints = []
 
         # 첫 번째 웨이포인트
         waypoint1 = PoseStamped()
@@ -132,7 +132,7 @@ class MoveToZoneActionServer(Node):
         # waypoint1.pose.orientation.y = 0.0
         # waypoint1.pose.orientation.z = -0.9999865408184966
         # waypoint1.pose.orientation.w = 0.005188273494832019
-        waypoints.append(waypoint1)
+        self.waypoints.append(waypoint1)
 
         # 두 번째 웨이포인트
         waypoint2 = PoseStamped()
@@ -150,11 +150,11 @@ class MoveToZoneActionServer(Node):
         # waypoint2.pose.orientation.y = 0.0
         # waypoint2.pose.orientation.z = -0.9999330665398213
         # waypoint2.pose.orientation.w = 0.01156989370173046
-        waypoints.append(waypoint2)
+        self.waypoints.append(waypoint2)
 
         # FollowWaypoints 액션 목표 생성 및 전송
         goal_msg = FollowWaypoints.Goal()
-        goal_msg.poses = waypoints
+        goal_msg.poses = self.waypoints
 
         # 서버 연결 대기
         self.amr_waypoint_action_client.wait_for_server()
@@ -206,6 +206,42 @@ class MoveToZoneActionServer(Node):
         if missed_waypoints:
             self.get_logger().info(f'Missed waypoints: {missed_waypoints}')
             # 웨이포인트를 놓친다면 다시 놓친 웨이 포인트 부터 시작
+            
+            if missed_waypoints[0] == 0:
+                self.waypoint_goal()
+            else:
+                waypoints_2 = []
+                waypoint2 = PoseStamped()
+                waypoint2.header.stamp.sec = 0
+                waypoint2.header.stamp.nanosec = 0
+                waypoint2.header.frame_id = "map"  # 프레임 ID를 설정 (예: "map")
+                waypoint2.pose.position.x = 0.2981
+                waypoint2.pose.position.y = -0.61095
+                waypoint2.pose.position.z = 0.0
+                
+                waypoint2_yaw = 1.0  # Target orientation in radians
+                waypoint2.pose.orientation = self.euler_to_quaternion(0, 0, waypoint2_yaw)
+                
+                # waypoint2.pose.orientation.x = 0.0
+                # waypoint2.pose.orientation.y = 0.0
+                # waypoint2.pose.orientation.z = -0.9999330665398213
+                # waypoint2.pose.orientation.w = 0.01156989370173046
+                waypoints_2.append(waypoint2)
+
+                # FollowWaypoints 액션 목표 생성 및 전송
+                goal_msg = FollowWaypoints.Goal()
+                goal_msg.poses = waypoints_2
+
+                # 서버 연결 대기
+                self.amr_waypoint_action_client.wait_for_server()
+
+                print('ss')
+                # 목표 전송 및 피드백 콜백 설정
+                self._send_goal_future = self.amr_waypoint_action_client.send_goal_async(
+                    goal_msg,
+                    feedback_callback=self.waypoint_feedback_callback
+                )
+                self._send_goal_future.add_done_callback(self.waypoint_response_callback)
 
         else:
             self.get_logger().info('All waypoints completed successfully!')
@@ -388,6 +424,20 @@ class MoveToZoneActionServer(Node):
     
     def active_gohome_mode(self):
         if self.AMR_mode == 0:
+            rev_waypoint = self.waypoints[::-1]
+            goal_msg = FollowWaypoints.Goal()
+            goal_msg.poses = rev_waypoint
+
+            # 서버 연결 대기
+            self.amr_waypoint_action_client.wait_for_server()
+
+            print('ss')
+            # 목표 전송 및 피드백 콜백 설정
+            self._send_goal_future = self.amr_waypoint_action_client.send_goal_async(
+                goal_msg,
+                feedback_callback=self.waypoint_feedback_callback
+            )
+            self._send_goal_future.add_done_callback(self.waypoint_response_callback)
             self.navigate_to_zone("Home")
 
     def handle_gohome_service_request(self, request, response):
@@ -569,6 +619,7 @@ def keyboard_listener(node):
                 if key.lower() == 's':
                     node.get_logger().info('Key "s" pressed. Cancelling goal...')
                     node.cancel_move()
+                    node.AMR_mode = 0
                     break
     finally:
         termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
