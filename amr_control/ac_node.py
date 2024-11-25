@@ -59,6 +59,8 @@ class MoveToZoneActionServer(Node):
         self.AMR_image_publisher = self.create_publisher(Image,'amr_image',10)
         # SM_tracked_image_pub
         self.sm_tracked_image_publisher = self.create_publisher(Image, 'tracked_image', 10)
+        # SM_mod_pub
+        self.sm_mod_publisher = self.create_publisher(msg.String, 'amr_mod', 10)
 
 
         # AMR AMR_Image_sub
@@ -302,6 +304,9 @@ class MoveToZoneActionServer(Node):
         # If a detection is found, draw it and control the robot
         if intruder_detection:
             self.AMR_mode = 2 # tracking mode
+            amr_mod = msg.String()
+            amr_mod.data = 'tracking mod'
+            self.sm_mod_publisher.publish(amr_mod)
 
             x1, y1, x2, y2, confidence, class_id = intruder_detection
             center_x = int((x1 + x2) / 2)
@@ -356,6 +361,9 @@ class MoveToZoneActionServer(Node):
         else:
             if self.AMR_mode == 2:
                 self.AMR_mode = 1
+                amr_mod = msg.String()
+                amr_mod.data = 'patrol mod'
+                self.sm_mod_publisher.publish(amr_mod)
                 self.active_patrol_mode()
 
 
@@ -386,6 +394,9 @@ class MoveToZoneActionServer(Node):
         response.success = True
 
         self.AMR_mode = 0
+        amr_mod = msg.String()
+        amr_mod.data = 'home mod'
+        self.sm_mod_publisher.publish(amr_mod)
         # goal_msg = PoseStamped()
         # goal_msg.header.frame_id = 'map'  # SLAM에서 사용되는 좌표계 (보통 'map' 프레임)
         # goal_msg.pose.position.x = self.home_pose.x
@@ -483,10 +494,10 @@ class MoveToZoneActionServer(Node):
 
         # Set the orientation (in quaternion form)
         initial_pose.pose.pose.orientation = Quaternion(
-            x=0.0,
-            y=0.0,
-            z=-0.04688065682721989,  # 90-degree rotation in yaw (example)
-            w=0.9989004975549108  # Corresponding quaternion w component
+            x=0.043317,
+            y=0.033049,
+            z=0.0,  # 90-degree rotation in yaw (example)
+            w=-0.003  # Corresponding quaternion w component
         )
 
         # covariance:
@@ -529,8 +540,8 @@ class MoveToZoneActionServer(Node):
 
         # Set the covariance values for the pose estimation
         initial_pose.pose.covariance = [
-            0.25, 0.0, 0.0, 0.0, 0.0, 0.0,
-            0.0, 0.25, 0.0, 0.0, 0.0, 0.0,
+            0.2, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.2, 0.0, 0.0, 0.0, 0.0,
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
